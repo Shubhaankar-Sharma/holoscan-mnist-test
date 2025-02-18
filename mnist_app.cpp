@@ -1,120 +1,272 @@
 #include <holoscan/holoscan.hpp>
-#include <holoscan/core/operator.hpp>
-#include <holoscan/core/gxf/entity.hpp>
-#include <holoscan/core/execution_context.hpp>
 #include <torch/torch.h>
-#include <gxf/std/tensor.hpp>
+#include <memory>
+#include <vector>
 #include "inference.hpp"
+#include <gxf/std/tensor.hpp>
 
+using holoscan::Operator;
+using holoscan::OperatorSpec;
+using holoscan::InputContext;
+using holoscan::OutputContext;
+using holoscan::ExecutionContext;
+using holoscan::Arg;
+using holoscan::ArgList;
 
-// MNIST Input Operator
-class MNISTInputOp : public holoscan::Operator {
+class MNISTInputOp : public Operator {
  public:
   HOLOSCAN_OPERATOR_FORWARD_ARGS(MNISTInputOp)
-
   MNISTInputOp() = default;
 
-  void setup(holoscan::OperatorSpec& spec) override {
-    spec.output<nvidia::gxf::Tensor>("input_tensor");
+  void setup(OperatorSpec& spec) override {
+    spec.output<holoscan::gxf::Entity>("input_tensor");
+    spec.param(allocator_, "allocator_", "Allocator", "Output Allocator");
   }
 
   void initialize() override {
-    // No dataset initialization needed for hardcoded input
+    auto data_path_ = "/home/holoscan/test_app_2/data/MNIST/raw";
+    auto base_dataset = torch::data::datasets::MNIST(data_path_);
+    auto size_before = base_dataset.size();
+    HOLOSCAN_LOG_INFO("Base dataset size: {}", size_before.has_value() ? size_before.value() : -1);
+    
+    // Apply normalize transform
+    auto normalized_dataset = base_dataset.map(torch::data::transforms::Normalize<>(0.1307, 0.3081));
+    auto size_after_norm = normalized_dataset.size();
+    HOLOSCAN_LOG_INFO("Size after normalize: {}", size_after_norm.has_value() ? size_after_norm.value() : -1);
+    
+    // Apply stack transform
+    auto stacked_dataset = normalized_dataset.map(torch::data::transforms::Stack<>());
+    auto size_after_stack = stacked_dataset.size();
+    HOLOSCAN_LOG_INFO("Size after stack: {}", size_after_stack.has_value() ? size_after_stack.value() : -1);
+    
+    dataset_size_ = size_after_stack.value();
+    HOLOSCAN_LOG_INFO("Final dataset size: {}", dataset_size_);
+    num_processed_ = 0;
+    // Additional debug info
+    try {
+        auto example = base_dataset.get(0);
+        HOLOSCAN_LOG_INFO("Successfully got first example from base dataset");
+        HOLOSCAN_LOG_INFO("Example data size: {}", example.data.sizes());
+        HOLOSCAN_LOG_INFO("Example target size: {}", example.target.sizes());
+    } catch (const c10::Error& e) {
+        HOLOSCAN_LOG_ERROR("Error accessing first example from base dataset: {}", e.what());
+    }
+    
+    Operator::initialize();
+  }
+  void start() override {
+    HOLOSCAN_LOG_TRACE("MNISTInputOp::start()");
   }
 
-  void compute(holoscan::InputContext&, holoscan::OutputContext& op_output, holoscan::ExecutionContext& context) override {
-    try {
-      // Create a hardcoded input tensor
-      auto input_tensor = torch::rand({1, 1, 28, 28}, torch::kCUDA); // Random tensor for testing
+  template <std::size_t N, std::size_t C>
+  void add_data(holoscan::gxf::Entity& entity, const char* name,
+                const std::array<std::array<float, C>, N>& data, ExecutionContext& context) {
+    // get Handle to underlying nvidia::gxf::Allocator from std::shared_ptr<holoscan::Allocator>
+    auto allocator = nvidia::gxf::Handle<nvidia::gxf::Allocator>::Create(context.context(),
+                                                                         allocator_->gxf_cid());
+    // add a tensor
+    auto tensor = static_cast<nvidia::gxf::Entity&>(entity).add<nvidia::gxf::Tensor>(name).value();
+    // reshape the tensor to the size of the data
+    tensor->reshape<float>(
+        nvidia::gxf::Shape({N, C}), nvidia::gxf::MemoryStorageType::kHost, allocator.value());
+    // copy the data to the tensor
+    std::memcpy(tensor->pointer(), data.data(), N * C * sizeof(float));
+  }
 
-      // Create GXF tensor
-      auto allocator = nvidia::gxf::Handle<nvidia::gxf::Allocator>::Create(context.context(), context.gxf_cid());
-      if (!allocator) {
-        throw std::runtime_error("Failed to create allocator");
+  void compute(InputContext&, OutputContext& op_output, ExecutionContext& context) override {
+    if (num_processed_ == -1) {
+      return;
+    }
+
+    if (num_processed_ >= dataset_size_) {
+      HOLOSCAN_LOG_INFO("MNISTInputOp::Dataset iteration complete");
+      HOLOSCAN_LOG_INFO("whY??? Final dataset size: {}", dataset_size_);
+      num_processed_ = -1;
+      return;
+    }
+
+    auto dataset = torch::data::datasets::MNIST("/home/holoscan/test_app_2/data/MNIST/raw")
+        .map(torch::data::transforms::Normalize<>(0.1307, 0.3081))
+        .map(torch::data::transforms::Stack<>());
+        
+    auto loader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
+        std::move(dataset), 1);
+
+
+    size_t current = 0;
+    for (auto& batch : *loader) {
+      if (current++ < num_processed_) {
+            continue;
       }
+      auto images = batch.data;
 
-      auto tensor = nvidia::gxf::Tensor::Create(
-          allocator.value(),
-          nvidia::gxf::Shape{1, 1, 28, 28},
-          nvidia::gxf::PrimitiveType::kFloat32,
-          nvidia::gxf::MemoryStorageType::kDevice);
-      
-      if (!tensor) {
-        throw std::runtime_error("Failed to create tensor");
-      }
+      images = images.reshape({1, 1, 28, 28});
 
-      // Copy data from PyTorch tensor to GXF tensor
-      cudaMemcpy(tensor.value().data<float>(),
-                input_tensor.data_ptr<float>(),
-                tensor.value().size(),
+      auto entity = holoscan::gxf::Entity::New(&context);
+      auto allocator = nvidia::gxf::Handle<nvidia::gxf::Allocator>::Create(context.context(),
+                                                                      allocator_->gxf_cid());
+      // Add tensor to entity
+      auto tensor = static_cast<nvidia::gxf::Entity&>(entity)
+                .add<nvidia::gxf::Tensor>("input_tensor").value();
+
+      // Move PyTorch tensor to GPU first
+      auto cuda_images = images.to(torch::kCUDA);
+
+      // Reshape tensor with MNIST dimensions - Use kDevice for GPU memory
+      tensor->reshape<float>(
+          nvidia::gxf::Shape({1, 1, 28, 28}), 
+          nvidia::gxf::MemoryStorageType::kDevice,  // Change to GPU memory
+          allocator.value());
+
+      // Copy data using CUDA since both tensors are on GPU
+      cudaMemcpy(tensor->pointer(), 
+                cuda_images.data_ptr<float>(), 
+                cuda_images.numel() * sizeof(float), 
                 cudaMemcpyDeviceToDevice);
-      
-      op_output.emit(tensor.value(), "input_tensor");
-      
-      std::cout << "Emitting hardcoded input tensor" << std::endl;
-    } catch (const std::exception& e) {
-      std::cout << "Error in compute: " << e.what() << std::endl;
+
+      op_output.emit(entity, "input_tensor");
+      num_processed_++;
+      break;  // Process only one batch
     }
   }
+
+  void stop() override {
+    HOLOSCAN_LOG_TRACE("MNISTInputOp::stop()");
+  }
+
+  private:
+    Parameter<std::shared_ptr<Allocator>> allocator_;
+    uint32_t count_ = 0;
+    std::string data_path_;
+    size_t num_processed_;
+    size_t dataset_size_;
 };
 
-// Print Operator
-class PrintOp : public holoscan::Operator {
- public:
+class PrintOp : public Operator {
+  public:
   HOLOSCAN_OPERATOR_FORWARD_ARGS(PrintOp)
-
   PrintOp() = default;
 
-  void setup(holoscan::OperatorSpec& spec) override {
-    spec.input<nvidia::gxf::Tensor>("tensor");
+  void setup(OperatorSpec& spec) override {
+    spec.input<holoscan::gxf::Entity>("output_tensor");
   }
 
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext&, holoscan::ExecutionContext&) override {
-    auto tensor = op_input.receive<nvidia::gxf::Tensor>("tensor");
-    if (!tensor) return;
+  // void initialize() override {
+  //   allocator_ = fragment()->make_resource<UnboundedAllocator>("pool");
+  //   add_arg(allocator_);
+  //   Operator::initialize();
+  // }
 
-    // Get tensor data
-    auto shape = tensor->shape();
-    auto data = tensor->data<float>();
+  void start() override {
+    HOLOSCAN_LOG_TRACE("PrintOp::start()");
+  }
 
-    // Print prediction (assuming output is a 1x10 tensor of class probabilities)
-    float max_prob = 0.0f;
-    int predicted_class = 0;
-    
-    for (int i = 0; i < 10; i++) {
-      if (data[i] > max_prob) {
-        max_prob = data[i];
-        predicted_class = i;
+  void compute(InputContext& op_input, OutputContext& op_output, ExecutionContext& context) override {
+    auto maybe_entity = op_input.receive<holoscan::gxf::Entity>("output_tensor");
+    if (maybe_entity) {
+      auto& entity = maybe_entity.value();
+
+      auto tensor = entity.get<holoscan::Tensor>("output_tensor");
+      if (!tensor) {
+        HOLOSCAN_LOG_ERROR("No tensor in output");
+        return;
+      }
+
+      // Get pointer to raw tensor data
+      size_t size = tensor->size();
+
+      // Pointer to GPU data
+      const float* gpu_data = static_cast<const float*>(tensor->data());
+
+      // Copy the data to host
+      std::vector<float> host_data(size);
+      cudaMemcpy(host_data.data(), gpu_data, size*sizeof(float), cudaMemcpyDeviceToHost);
+
+      // Now 'host_data' is safe to access in CPU code
+      // Find predicted digit
+      int predicted_digit = 0;
+      float max_val = host_data[0];
+      for (int i = 1; i < size; ++i) {
+        if (host_data[i] > max_val) {
+          max_val = host_data[i];
+          predicted_digit = i;
+        }
+      }
+
+      // Softmax (for printing probabilities, if needed)
+      float exp_sum = 0.f;
+      for (auto& val : host_data) {
+        exp_sum += std::exp(val);
+      }
+
+      HOLOSCAN_LOG_INFO("Predicted Digit!!!!: {}", predicted_digit);
+      HOLOSCAN_LOG_INFO("Confidence: {:.2f}%", 
+          (std::exp(host_data[predicted_digit]) / exp_sum) * 100.f);
+
+      // Print all probabilities
+      for (int i = 0; i < size; i++) {
+        auto prob = (std::exp(host_data[i]) / exp_sum) * 100.f;
+        HOLOSCAN_LOG_INFO("Probability for digit {}: {:.2f}%", i, prob);
       }
     }
-
-    std::cout << "Predicted digit: " << predicted_class 
-              << " (confidence: " << max_prob << ")" << std::endl;
   }
+
+  void stop() override {
+    HOLOSCAN_LOG_TRACE("PrintOp::stop()");
+  }
+
+  // private:
+    // std::shared_ptr<UnboundedAllocator> allocator_;
 };
 
-// Main Application
 class MNISTApp : public holoscan::Application {
  public:
   void compose() override {
     using namespace holoscan;
     
-    // Create operators
-    auto mnist_input = make_operator<MNISTInputOp>("mnist_input", 1);
-    auto inference = make_operator<ops::InferenceOp>("inference");
-    auto print_op = make_operator<PrintOp>("print");
-    
-    // Define workflow
-    add_flow(mnist_input, inference, {{"input_tensor", "input_tensor"}});
-    add_flow(inference, print_op, {{"output_tensor", "tensor"}});
+    auto allocator = make_resource<UnboundedAllocator>("pool");
+    auto cuda_stream_pool = make_resource<CudaStreamPool>(
+        "cuda_stream_pool",
+        Arg("dev_id", 0));
+
+    auto input_op = make_operator<MNISTInputOp>(
+        "input", 
+        Arg("allocator_", allocator));
+
+    // auto inference_op = make_operator<InferenceOp>(
+    //     "inference",
+    //     Arg("allocator", allocator),
+    //     Arg("cuda_stream_pool", cuda_stream_pool),
+    //     Arg("model_path", "/path/to/mnist_model.onnx"),
+    //     Arg("input_tensor_names", std::vector<std::string>{"input_tensor"}),
+    //     Arg("output_tensor_names", std::vector<std::string>{"output_tensor"}),
+    //     Arg("backend", "trt"));
+    auto inference_op = make_operator<InferenceOp>(
+        "inference",
+        Arg("allocator", allocator),
+        Arg("cuda_stream_pool", cuda_stream_pool),
+        Arg("backend", std::string("trt")),
+        Arg("model_path_map", InferenceOp::DataMap{
+            {{"resnet", "/workspace/models/cnn_mnist.onnx"}}
+        }),
+        Arg("inference_map", InferenceOp::DataVecMap{
+            {{"resnet", std::vector<std::string>{"output_tensor"}}}
+        }),
+        Arg("pre_processor_map", InferenceOp::DataVecMap{
+            {{"resnet", std::vector<std::string>{"input_tensor"}}}
+        }));
+
+    auto output_op = make_operator<PrintOp>("output");
+
+    // add_flow(input_op, output_op, {{"input_tensor", "input_tensor"}});
+
+    add_flow(input_op, inference_op, {{"input_tensor", "receivers"}});
+    add_flow(inference_op, output_op, {{"transmitter", "output_tensor"}});
   }
 };
 
 int main(int argc, char** argv) {
-  auto app = holoscan::make_application<MNISTApp>();
-  
-  // Initialize and run
-  app->run();
-
-  return 0;
+    auto app = std::make_unique<MNISTApp>();
+    app->run();
+    return 0;
 }

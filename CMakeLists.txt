@@ -37,4 +37,8 @@ target_link_libraries(mnist_app
     ${TORCH_LIBRARIES}
     TorchVision::TorchVision
     CUDA::cudart
+    holoscan::ops::ping_tx  # If you're using ping operators
+    holoscan::ops::ping_rx
+    holoscan::infer
+    holoscan::infer_utils
 )

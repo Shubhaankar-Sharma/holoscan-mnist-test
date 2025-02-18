@@ -35,7 +35,14 @@
 
 namespace HoloInfer = holoscan::inference;
 
-namespace holoscan::ops {
+using holoscan::OperatorSpec;
+using holoscan::InputContext;
+using holoscan::OutputContext;
+using holoscan::ExecutionContext;
+using holoscan::Parameter;
+using holoscan::Allocator;
+using holoscan::CudaStreamPool;
+
 /**
  * @brief Inference Operator class to perform single/multi model inference.
  *
@@ -225,6 +232,5 @@ class InferenceOp : public holoscan::Operator {
   bool validate_tensor_dimensions_ = true;
 };
 
-}  // namespace holoscan::ops
 
 #endif /* HOLOSCAN_OPERATORS_INFERENCE_HPP */

@@ -65,6 +65,7 @@ class PrintOp(Operator):
         confidence = torch.softmax(output_tensor, dim=1)[0, predicted_digit].item()
 
         # Print the result
+        print(f"Tensor shape output: {output_tensor.shape}")
         print(f"✅ Predicted Digit: {predicted_digit}")
         print(f"✅ Confidence: {confidence:.4f}")
 

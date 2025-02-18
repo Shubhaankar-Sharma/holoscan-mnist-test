@@ -33,15 +33,15 @@
  * Custom YAML parser for DataMap class
  */
 template <>
-struct YAML::convert<holoscan::ops::InferenceOp::DataMap> {
-  static Node encode(const holoscan::ops::InferenceOp::DataMap& datamap) {
+struct YAML::convert<InferenceOp::DataMap> {
+  static Node encode(const InferenceOp::DataMap& datamap) {
     Node node;
     auto mappings = datamap.get_map();
     for (const auto& [key, value] : mappings) { node[key] = value; }
     return node;
   }
 
-  static bool decode(const Node& node, holoscan::ops::InferenceOp::DataMap& datamap) {
+  static bool decode(const Node& node, InferenceOp::DataMap& datamap) {
     if (!node.IsMap()) {
       HOLOSCAN_LOG_ERROR("InputSpec: expected a map");
       return false;
@@ -64,8 +64,8 @@ struct YAML::convert<holoscan::ops::InferenceOp::DataMap> {
  * Custom YAML parser for DataVecMap class
  */
 template <>
-struct YAML::convert<holoscan::ops::InferenceOp::DataVecMap> {
-  static Node encode(const holoscan::ops::InferenceOp::DataVecMap& datavmap) {
+struct YAML::convert<InferenceOp::DataVecMap> {
+  static Node encode(const InferenceOp::DataVecMap& datavmap) {
     Node node;
     auto mappings = datavmap.get_map();
     for (const auto& [key, vec_of_values] : mappings) {
@@ -74,7 +74,7 @@ struct YAML::convert<holoscan::ops::InferenceOp::DataVecMap> {
     return node;
   }
 
-  static bool decode(const Node& node, holoscan::ops::InferenceOp::DataVecMap& datavmap) {
+  static bool decode(const Node& node, InferenceOp::DataVecMap& datavmap) {
     if (!node.IsMap()) {
       HOLOSCAN_LOG_ERROR("InputSpec: expected a map");
       return false;
@@ -117,13 +117,11 @@ struct YAML::convert<holoscan::ops::InferenceOp::DataVecMap> {
   }
 };
 
-namespace holoscan::ops {
-
 void InferenceOp::setup(OperatorSpec& spec) {
   register_converter<DataMap>();
   register_converter<DataVecMap>();
-  spec.input<std::vector<gxf::Entity>>("receivers", IOSpec::kAnySize);
-  spec.output<gxf::Entity>("transmitter");
+  spec.input<std::vector<nvidia::gxf::Entity>>("receivers", holoscan::IOSpec::kAnySize);
+  spec.output<nvidia::gxf::Entity>("transmitter");
 
   spec.param(backend_, "backend", "Supported backend", "backend", {});
   spec.param(backend_map_, "backend_map", "Supported backend map", "", DataMap());
@@ -183,7 +181,7 @@ void InferenceOp::setup(OperatorSpec& spec) {
              "cuda_stream_pool",
              "CUDA Stream Pool",
              "Instance of gxf::CudaStreamPool.",
-             ParameterFlag::kOptional);
+             holoscan::ParameterFlag::kOptional);
 }
 
 void InferenceOp::initialize() {
@@ -322,5 +320,3 @@ void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
                            "Compute, Inference execution, Message->" + std::string(r_.what()));
   } catch (...) { HoloInfer::raise_error(module_, "Compute, unknown exception"); }
 }
-
-}  // namespace holoscan::ops
