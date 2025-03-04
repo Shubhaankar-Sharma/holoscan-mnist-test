@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include "inference.hpp"
+#include "profiler.hpp" 
 #include <gxf/std/tensor.hpp>
 
 using holoscan::Operator;
@@ -268,5 +269,7 @@ class MNISTApp : public holoscan::Application {
 int main(int argc, char** argv) {
     auto app = std::make_unique<MNISTApp>();
     app->run();
+    HoloscanProfiler::getInstance().printReport();
+    HoloscanProfiler::getInstance().saveReportToFile("mnist_inference_profile.csv");
     return 0;
 }

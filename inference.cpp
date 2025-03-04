@@ -28,6 +28,8 @@
 #include "holoscan/core/io_context.hpp"
 #include "holoscan/core/operator_spec.hpp"
 #include "holoscan/core/resources/gxf/allocator.hpp"
+#include "profiler.hpp"
+// #include <nvtx3/nvtx3.hpp>
 
 /**
  * Custom YAML parser for DataMap class
@@ -248,6 +250,12 @@ void InferenceOp::stop() {
 
 void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
                           ExecutionContext& context) {
+  // NVTX range for the entire compute method
+  // nvtx3::scoped_range compute_range{"InferenceOp::compute"};
+  
+  // Profile the entire compute method
+  PROFILE_CPU_SCOPE("InferenceOp::compute_total");
+  
   // get Handle to underlying nvidia::gxf::Allocator from std::shared_ptr<holoscan::Allocator>
   auto allocator =
       nvidia::gxf::Handle<nvidia::gxf::Allocator>::Create(context.context(), allocator_->gxf_cid());
@@ -255,25 +263,33 @@ void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
   try {
     // Extract relevant data from input GXF Receivers, and update inference specifications
     // (cuda_stream will be set by get_data_per_model)
-    cudaStream_t cuda_stream{};
-    gxf_result_t stat = holoscan::utils::get_data_per_model(op_input,
-                                                            in_tensor_names_.get(),
-                                                            inference_specs_->data_per_tensor_,
-                                                            dims_per_tensor_,
-                                                            input_on_cuda_.get(),
-                                                            module_,
-                                                            cuda_stream);
+    {
+      PROFILE_CPU_SCOPE("InferenceOp::data_extraction");
+      // nvtx3::scoped_range data_extraction_range{"InferenceOp::data_extraction"};
+      
+      cudaStream_t cuda_stream{};
+      gxf_result_t stat = holoscan::utils::get_data_per_model(op_input,
+                                                          in_tensor_names_.get(),
+                                                          inference_specs_->data_per_tensor_,
+                                                          dims_per_tensor_,
+                                                          input_on_cuda_.get(),
+                                                          module_,
+                                                          cuda_stream);
 
-    if (stat != GXF_SUCCESS) { HoloInfer::raise_error(module_, "Tick, Data extraction"); }
+      if (stat != GXF_SUCCESS) { HoloInfer::raise_error(module_, "Tick, Data extraction"); }
 
-    // Transmit this stream on the output port if needed
-    if (cuda_stream != cudaStreamDefault && output_on_cuda_.get()) {
-      HOLOSCAN_LOG_TRACE("InferenceOp: forwarding CUDA stream from receivers input to output");
-      op_output.set_cuda_stream(cuda_stream, "transmitter");
+      // Transmit this stream on the output port if needed
+      if (cuda_stream != cudaStreamDefault && output_on_cuda_.get()) {
+        HOLOSCAN_LOG_TRACE("InferenceOp: forwarding CUDA stream from receivers input to output");
+        op_output.set_cuda_stream(cuda_stream, "transmitter");
+      }
     }
 
     // check for tensor validity the first time
     if (validate_tensor_dimensions_) {
+      PROFILE_CPU_SCOPE("InferenceOp::validate_dimensions");
+      // nvtx3::scoped_range validate_range{"InferenceOp::validate_dimensions"};
+      
       validate_tensor_dimensions_ = false;
       auto model_in_dims_map = holoscan_infer_context_->get_input_dimensions();
 
@@ -284,37 +300,47 @@ void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
                                "Compute, Inference execution, " + dim_status.get_message());
       }
     }
+    
     // Execute inference and populate output buffer in inference specifications
-    HoloInfer::TimePoint s_time, e_time;
-    HoloInfer::timer_init(s_time);
+    {
+      PROFILE_CPU_SCOPE("InferenceOp::inference_execution_cpu");
+      PROFILE_CUDA_SCOPE("InferenceOp::inference_execution_gpu");
+      // nvtx3::scoped_range inference_range{"InferenceOp::inference_execution"};
+      
+      inference_specs_->set_activation_map(activation_map_.get().get_map());
 
-    inference_specs_->set_activation_map(activation_map_.get().get_map());
-
-    auto status = holoscan_infer_context_->execute_inference(inference_specs_, cuda_stream);
-    HoloInfer::timer_init(e_time);
-    HoloInfer::timer_check(s_time, e_time, "Inference Operator: Inference execution");
-    if (status.get_code() != HoloInfer::holoinfer_code::H_SUCCESS) {
-      status.display_message();
-      HoloInfer::raise_error(module_, "Compute, Inference execution, " + status.get_message());
+      cudaStream_t cuda_stream{};
+      auto status = holoscan_infer_context_->execute_inference(inference_specs_, cuda_stream);
+      
+      if (status.get_code() != HoloInfer::holoinfer_code::H_SUCCESS) {
+        status.display_message();
+        HoloInfer::raise_error(module_, "Compute, Inference execution, " + status.get_message());
+      }
+      HOLOSCAN_LOG_DEBUG(status.get_message());
     }
-    HOLOSCAN_LOG_DEBUG(status.get_message());
 
     // Get output dimensions
     auto model_out_dims_map = holoscan_infer_context_->get_output_dimensions();
 
     // Transmit output buffers via a single GXF transmitter
-    stat = holoscan::utils::transmit_data_per_model(cont,
-                                                    inference_map_.get().get_map(),
-                                                    inference_specs_->output_per_model_,
-                                                    op_output,
-                                                    out_tensor_names_.get(),
-                                                    model_out_dims_map,
-                                                    output_on_cuda_.get(),
-                                                    transmit_on_cuda_.get(),
-                                                    allocator.value(),
-                                                    module_,
-                                                    cuda_stream);
-    if (stat != GXF_SUCCESS) { HoloInfer::raise_error(module_, "Compute, Data Transmission"); }
+    {
+      PROFILE_CPU_SCOPE("InferenceOp::data_transmission");
+      // nvtx3::scoped_range transmission_range{"InferenceOp::data_transmission"};
+      
+      cudaStream_t cuda_stream{};
+      gxf_result_t stat = holoscan::utils::transmit_data_per_model(cont,
+                                                              inference_map_.get().get_map(),
+                                                              inference_specs_->output_per_model_,
+                                                              op_output,
+                                                              out_tensor_names_.get(),
+                                                              model_out_dims_map,
+                                                              output_on_cuda_.get(),
+                                                              transmit_on_cuda_.get(),
+                                                              allocator.value(),
+                                                              module_,
+                                                              cuda_stream);
+      if (stat != GXF_SUCCESS) { HoloInfer::raise_error(module_, "Compute, Data Transmission"); }
+    }
   } catch (const std::runtime_error& r_) {
     HoloInfer::raise_error(module_,
                            "Compute, Inference execution, Message->" + std::string(r_.what()));
