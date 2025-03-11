@@ -265,8 +265,7 @@ void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
     // (cuda_stream will be set by get_data_per_model)
     {
       PROFILE_CPU_SCOPE("InferenceOp::data_extraction");
-      // nvtx3::scoped_range data_extraction_range{"InferenceOp::data_extraction"};
-      
+      PROFILE_CUDA_SCOPE("InferenceOp::data_extraction_gpu");
       cudaStream_t cuda_stream{};
       gxf_result_t stat = holoscan::utils::get_data_per_model(op_input,
                                                           in_tensor_names_.get(),

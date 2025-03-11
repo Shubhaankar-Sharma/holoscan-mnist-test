@@ -65,6 +65,7 @@ public:
         
         auto& events = event_stack.back();
         cudaEventRecord(events.second);
+        // stops CPU until GPU is done with the event otherwise we would just record the cpu timings of calling the event record functions... what are the consequences?
         cudaEventSynchronize(events.second);
         
         float milliseconds = 0;
