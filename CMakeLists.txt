@@ -3,6 +3,9 @@ project(mnist_inference)
 
 set(Torch_DIR "/home/holoscan/libtorch/share/cmake/Torch")
 
+# Add NVTX subdirectory - adjust path based on where you cloned NVTX
+add_subdirectory(NVTX)
+
 # Find required packages
 find_package(holoscan REQUIRED)
 find_package(CUDAToolkit REQUIRED)
@@ -41,4 +44,5 @@ target_link_libraries(mnist_app
     holoscan::ops::ping_rx
     holoscan::infer
     holoscan::infer_utils
+    nvtx3-cpp  # Link with NVTX C++ API
 )

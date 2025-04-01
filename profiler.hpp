@@ -10,6 +10,10 @@
 #include <fstream>
 #include <iostream>
 #include <cuda_runtime.h>
+#include <nvtx3/nvtx3.hpp>  // NVTX3 header
+
+// Define a custom domain for our profiler
+struct holoscan_domain { static constexpr char const* name{"HOLOSCAN"}; };
 
 class HoloscanProfiler {
 public:
@@ -22,6 +26,12 @@ public:
     // CPU timing methods
     void startCpuTimer(const std::string& name) {
         std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Create a named string for NVTX (avoid temporary strings)
+        std::string event_name = name + " start";
+        // Mark the start in NVTX
+        nvtx3::mark_in<holoscan_domain>(event_name.c_str());
+        
         cpu_timers_[name].push_back(std::chrono::high_resolution_clock::now());
     }
 
@@ -40,11 +50,25 @@ public:
         
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop_time - start_time).count();
         cpu_durations_[name].push_back(duration);
+        
+        // Create a named string for NVTX (avoid temporary strings)
+        std::string event_name = name + " end";
+        // Mark the end in NVTX
+        nvtx3::mark_in<holoscan_domain>(event_name.c_str());
     }
 
     // CUDA event timing methods
     void startCudaTimer(const std::string& name) {
         std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Create a named string for NVTX (avoid temporary strings)
+        std::string event_name = name + " start";
+        
+        // Create event attributes with the name and color
+        nvtx3::event_attributes attr(event_name.c_str(), nvtx3::rgb{255, 0, 0});
+        
+        // Mark the start in NVTX
+        nvtx3::mark_in<holoscan_domain>(attr);
         
         cudaEvent_t start, stop;
         cudaEventCreate(&start);
@@ -65,18 +89,28 @@ public:
         
         auto& events = event_stack.back();
         cudaEventRecord(events.second);
-        // stops CPU until GPU is done with the event otherwise we would just record the cpu timings of calling the event record functions... what are the consequences?
         cudaEventSynchronize(events.second);
         
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, events.first, events.second);
         cuda_durations_[name].push_back(milliseconds);
         
-        // Optional: Destroy events to free resources
-        // cudaEventDestroy(events.first);
-        // cudaEventDestroy(events.second);
-        
         event_stack.pop_back();
+        
+        // Create a named string for NVTX (avoid temporary strings)
+        std::string event_name = name + " end";
+        
+        // Create event attributes with the name and color
+        nvtx3::event_attributes attr(event_name.c_str(), nvtx3::rgb{255, 0, 0});
+        
+        // Mark the end in NVTX
+        nvtx3::mark_in<holoscan_domain>(attr);
+    }
+
+    // Add a method for direct NVTX markers
+    void markEvent(const std::string& name) {
+        // Create a marker (instantaneous event) in our domain
+        nvtx3::mark_in<holoscan_domain>(name.c_str());
     }
 
     // Report generation
@@ -204,7 +238,6 @@ public:
             }
         }
         cuda_events_.clear();
-        cuda_durations_.clear();
     }
 
     // Destructor to clean up CUDA events
@@ -235,6 +268,11 @@ private:
 #define PROFILE_CPU_STOP(name) HoloscanProfiler::getInstance().stopCpuTimer(name)
 #define PROFILE_CUDA_START(name) HoloscanProfiler::getInstance().startCudaTimer(name)
 #define PROFILE_CUDA_STOP(name) HoloscanProfiler::getInstance().stopCudaTimer(name)
+#define PROFILE_NVTX_MARK(name) HoloscanProfiler::getInstance().markEvent(name)
+
+// NVTX-specific convenience macros
+#define NVTX_RANGE(name) nvtx3::scoped_range_in<holoscan_domain> _nvtx_range{name}
+#define NVTX_MARK(name) nvtx3::mark_in<holoscan_domain>(name)
 
 // Scope-based RAII profiler
 class ScopedCpuProfiler {
@@ -265,7 +303,25 @@ private:
     std::string name_;
 };
 
+// Direct NVTX scoped range profiler 
+class ScopedNvtxProfiler {
+public:
+    explicit ScopedNvtxProfiler(const std::string& name) 
+        // Create a scoped range directly as a member variable (stack allocation)
+        : range_{name.c_str()}
+    {
+    }
+    
+private:
+    // This must be a direct member, not a pointer
+    nvtx3::scoped_range_in<holoscan_domain> range_;
+};
+
 #define PROFILE_CPU_SCOPE(name) ScopedCpuProfiler scoped_cpu_profiler_##__LINE__(name)
 #define PROFILE_CUDA_SCOPE(name) ScopedCudaProfiler scoped_cuda_profiler_##__LINE__(name)
+#define PROFILE_NVTX_SCOPE(name) ScopedNvtxProfiler scoped_nvtx_profiler_##__LINE__(name)
+
+// Use the NVTX function range macro to automatically create a range for a function
+#define FUNC_RANGE() NVTX3_FUNC_RANGE_IN(holoscan_domain)
 
 #endif // HOLOSCAN_PROFILER_HPP

@@ -4,6 +4,7 @@
 #include <vector>
 #include "inference.hpp"
 #include "profiler.hpp" 
+#include <nvtx3/nvtx3.hpp>  // Add NVTX header
 #include <gxf/std/tensor.hpp>
 
 using holoscan::Operator;
@@ -13,6 +14,9 @@ using holoscan::OutputContext;
 using holoscan::ExecutionContext;
 using holoscan::Arg;
 using holoscan::ArgList;
+
+// Define a domain for the MNIST application - separate from our profiler domain
+struct mnist_app_domain { static constexpr char const* name{"MNIST_APP"}; };
 
 class MNISTInputOp : public Operator {
  public:
@@ -25,6 +29,9 @@ class MNISTInputOp : public Operator {
   }
 
   void initialize() override {
+    // Use NVTX3 range for initialization - this is stack allocated
+    nvtx3::scoped_range_in<mnist_app_domain> init_range{"MNISTInputOp::initialize"};
+    
     auto data_path_ = "/home/holoscan/test_app_2/data/MNIST/raw";
     auto base_dataset = torch::data::datasets::MNIST(data_path_);
     auto size_before = base_dataset.size();
@@ -43,6 +50,7 @@ class MNISTInputOp : public Operator {
     dataset_size_ = size_after_stack.value();
     HOLOSCAN_LOG_INFO("Final dataset size: {}", dataset_size_);
     num_processed_ = 0;
+    
     // Additional debug info
     try {
         auto example = base_dataset.get(0);
@@ -55,8 +63,11 @@ class MNISTInputOp : public Operator {
     
     Operator::initialize();
   }
+  
   void start() override {
     HOLOSCAN_LOG_TRACE("MNISTInputOp::start()");
+    // Mark the start event in NVTX
+    nvtx3::mark_in<mnist_app_domain>("MNISTInputOp::start");
   }
 
   template <std::size_t N, std::size_t C>
@@ -75,6 +86,9 @@ class MNISTInputOp : public Operator {
   }
 
   void compute(InputContext&, OutputContext& op_output, ExecutionContext& context) override {
+    // Create NVTX range for the entire compute method - stack allocated
+    nvtx3::scoped_range_in<mnist_app_domain> compute_range{"MNISTInputOp::compute"};
+    
     if (num_processed_ == -1) {
       return;
     }
@@ -86,13 +100,15 @@ class MNISTInputOp : public Operator {
       return;
     }
 
+    // Create a stack-allocated range for dataset loading
+    nvtx3::scoped_range_in<mnist_app_domain> dataset_range{"MNISTInputOp::load_dataset"};
+    
     auto dataset = torch::data::datasets::MNIST("/home/holoscan/test_app_2/data/MNIST/raw")
         .map(torch::data::transforms::Normalize<>(0.1307, 0.3081))
         .map(torch::data::transforms::Stack<>());
         
     auto loader = torch::data::make_data_loader<torch::data::samplers::SequentialSampler>(
         std::move(dataset), 1);
-
 
     size_t current = 0;
     for (auto& batch : *loader) {
@@ -101,6 +117,9 @@ class MNISTInputOp : public Operator {
       }
       auto images = batch.data;
 
+      // Mark tensor reshaping in NVTX
+      nvtx3::mark_in<mnist_app_domain>("Reshaping tensor");
+      
       images = images.reshape({1, 1, 28, 28});
 
       auto entity = holoscan::gxf::Entity::New(&context);
@@ -110,6 +129,9 @@ class MNISTInputOp : public Operator {
       auto tensor = static_cast<nvidia::gxf::Entity&>(entity)
                 .add<nvidia::gxf::Tensor>("input_tensor").value();
 
+      // Create a stack-allocated range for CUDA transfer
+      nvtx3::scoped_range_in<mnist_app_domain> cuda_range{"CUDA transfer"};
+      
       // Move PyTorch tensor to GPU first
       auto cuda_images = images.to(torch::kCUDA);
 
@@ -133,6 +155,8 @@ class MNISTInputOp : public Operator {
 
   void stop() override {
     HOLOSCAN_LOG_TRACE("MNISTInputOp::stop()");
+    // Mark the stop event in NVTX
+    nvtx3::mark_in<mnist_app_domain>("MNISTInputOp::stop");
   }
 
   private:
@@ -152,17 +176,16 @@ class PrintOp : public Operator {
     spec.input<holoscan::gxf::Entity>("output_tensor");
   }
 
-  // void initialize() override {
-  //   allocator_ = fragment()->make_resource<UnboundedAllocator>("pool");
-  //   add_arg(allocator_);
-  //   Operator::initialize();
-  // }
-
   void start() override {
     HOLOSCAN_LOG_TRACE("PrintOp::start()");
+    // Mark the start event in NVTX
+    nvtx3::mark_in<mnist_app_domain>("PrintOp::start");
   }
 
   void compute(InputContext& op_input, OutputContext& op_output, ExecutionContext& context) override {
+    // Create NVTX range for the entire compute method - stack allocated
+    nvtx3::scoped_range_in<mnist_app_domain> compute_range{"PrintOp::compute"};
+    
     auto maybe_entity = op_input.receive<holoscan::gxf::Entity>("output_tensor");
     if (maybe_entity) {
       auto& entity = maybe_entity.value();
@@ -176,6 +199,9 @@ class PrintOp : public Operator {
       // Get pointer to raw tensor data
       size_t size = tensor->size();
 
+      // Create a stack-allocated range for CUDA to CPU transfer
+      nvtx3::scoped_range_in<mnist_app_domain> cuda_range{"CUDA to CPU transfer"};
+      
       // Pointer to GPU data
       const float* gpu_data = static_cast<const float*>(tensor->data());
 
@@ -183,6 +209,9 @@ class PrintOp : public Operator {
       std::vector<float> host_data(size);
       cudaMemcpy(host_data.data(), gpu_data, size*sizeof(float), cudaMemcpyDeviceToHost);
 
+      // Create a stack-allocated range for result processing
+      nvtx3::scoped_range_in<mnist_app_domain> processing_range{"Process results"};
+      
       // Now 'host_data' is safe to access in CPU code
       // Find predicted digit
       int predicted_digit = 0;
@@ -214,15 +243,17 @@ class PrintOp : public Operator {
 
   void stop() override {
     HOLOSCAN_LOG_TRACE("PrintOp::stop()");
+    // Mark the stop event in NVTX
+    nvtx3::mark_in<mnist_app_domain>("PrintOp::stop");
   }
-
-  // private:
-    // std::shared_ptr<UnboundedAllocator> allocator_;
 };
 
 class MNISTApp : public holoscan::Application {
  public:
   void compose() override {
+    // Mark application composition in NVTX - stack allocated
+    nvtx3::scoped_range_in<mnist_app_domain> range{"MNISTApp::compose"};
+    
     using namespace holoscan;
     
     auto allocator = make_resource<UnboundedAllocator>("pool");
@@ -234,14 +265,6 @@ class MNISTApp : public holoscan::Application {
         "input", 
         Arg("allocator_", allocator));
 
-    // auto inference_op = make_operator<InferenceOp>(
-    //     "inference",
-    //     Arg("allocator", allocator),
-    //     Arg("cuda_stream_pool", cuda_stream_pool),
-    //     Arg("model_path", "/path/to/mnist_model.onnx"),
-    //     Arg("input_tensor_names", std::vector<std::string>{"input_tensor"}),
-    //     Arg("output_tensor_names", std::vector<std::string>{"output_tensor"}),
-    //     Arg("backend", "trt"));
     auto inference_op = make_operator<InferenceOp>(
         "inference",
         Arg("allocator", allocator),
@@ -259,17 +282,31 @@ class MNISTApp : public holoscan::Application {
 
     auto output_op = make_operator<PrintOp>("output");
 
-    // add_flow(input_op, output_op, {{"input_tensor", "input_tensor"}});
-
     add_flow(input_op, inference_op, {{"input_tensor", "receivers"}});
     add_flow(inference_op, output_op, {{"transmitter", "output_tensor"}});
   }
 };
 
 int main(int argc, char** argv) {
+    // Mark application start in NVTX
+    nvtx3::mark_in<mnist_app_domain>("Application Start");
+    
     auto app = std::make_unique<MNISTApp>();
-    app->run();
+    
+    {
+      // Create a stack-allocated range for the app run
+      nvtx3::scoped_range_in<mnist_app_domain> run_range{"Application Run"};
+      app->run();
+    }
+    
+    // Mark profiler output in NVTX
+    nvtx3::mark_in<mnist_app_domain>("Profiler Report");
+    
     HoloscanProfiler::getInstance().printReport();
     HoloscanProfiler::getInstance().saveReportToFile("mnist_inference_profile.csv");
+    
+    // Mark application end in NVTX
+    nvtx3::mark_in<mnist_app_domain>("Application End");
+    
     return 0;
 }

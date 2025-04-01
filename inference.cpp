@@ -247,11 +247,10 @@ void InferenceOp::stop() {
   inference_specs_.reset();
   holoscan_infer_context_.reset();
 }
-
 void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
                           ExecutionContext& context) {
-  // NVTX range for the entire compute method
-  // nvtx3::scoped_range compute_range{"InferenceOp::compute"};
+  // Create NVTX range for the entire compute method - stack allocated
+  nvtx3::scoped_range_in<holoscan_domain> compute_range{"InferenceOp::compute"};
   
   // Profile the entire compute method
   PROFILE_CPU_SCOPE("InferenceOp::compute_total");
@@ -266,6 +265,9 @@ void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
     {
       PROFILE_CPU_SCOPE("InferenceOp::data_extraction");
       PROFILE_CUDA_SCOPE("InferenceOp::data_extraction_gpu");
+      // Create a local NVTX range that exists only in this scope
+      nvtx3::scoped_range_in<holoscan_domain> extract_range{"InferenceOp::data_extraction"};
+      
       cudaStream_t cuda_stream{};
       gxf_result_t stat = holoscan::utils::get_data_per_model(op_input,
                                                           in_tensor_names_.get(),
@@ -287,7 +289,7 @@ void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
     // check for tensor validity the first time
     if (validate_tensor_dimensions_) {
       PROFILE_CPU_SCOPE("InferenceOp::validate_dimensions");
-      // nvtx3::scoped_range validate_range{"InferenceOp::validate_dimensions"};
+      nvtx3::scoped_range_in<holoscan_domain> validate_range{"InferenceOp::validate_dimensions"};
       
       validate_tensor_dimensions_ = false;
       auto model_in_dims_map = holoscan_infer_context_->get_input_dimensions();
@@ -304,7 +306,7 @@ void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
     {
       PROFILE_CPU_SCOPE("InferenceOp::inference_execution_cpu");
       PROFILE_CUDA_SCOPE("InferenceOp::inference_execution_gpu");
-      // nvtx3::scoped_range inference_range{"InferenceOp::inference_execution"};
+      nvtx3::scoped_range_in<holoscan_domain> inference_range{"InferenceOp::inference_execution"};
       
       inference_specs_->set_activation_map(activation_map_.get().get_map());
 
@@ -324,7 +326,7 @@ void InferenceOp::compute(InputContext& op_input, OutputContext& op_output,
     // Transmit output buffers via a single GXF transmitter
     {
       PROFILE_CPU_SCOPE("InferenceOp::data_transmission");
-      // nvtx3::scoped_range transmission_range{"InferenceOp::data_transmission"};
+      nvtx3::scoped_range_in<holoscan_domain> transmission_range{"InferenceOp::data_transmission"};
       
       cudaStream_t cuda_stream{};
       gxf_result_t stat = holoscan::utils::transmit_data_per_model(cont,
